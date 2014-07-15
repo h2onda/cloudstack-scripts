@@ -1,0 +1,80 @@
+#!/bin/bash
+#
+# cloud-set-guest-sshkey    SSH Public Keys Download Client
+#
+# description: SSH Public Keys Download Client
+#
+# install to /etc/NetworkManager/dispatcher.d/
+
+prog=$(basename $0)
+
+# Modify this line to specify the user (default is root)
+user=root
+
+function cloud_set_guest_sshkey() {
+    # find dhcp lease file
+    interface=$1
+    connection_uuid=$2
+    dhcp_dirs=$(ls -d /var/lib/dhclient /var/lib/dhcp /var/lib/NetworkManager 2>/dev/null)
+    filename="dhclient-${connection_uuid}-${interface}.lease"
+    dhcp_files=$(find $dhcp_dirs -name $filename)
+    if [ -z "$dhcp_files" ]; then
+	    echo "$prog: Could not find $filename"
+	    return 1
+    fi
+    DHCP_FILE=$(ls -t $dhcp_files|head -1)
+
+    # find ssh key server ip
+    SSHKEY_SERVER_IP=$(grep dhcp-server-identifier $DHCP_FILE | tail -1 | awk '{print $NF}' | tr -d '\;')
+    if [ -z "${SSHKEY_SERVER_IP}" ]; then
+        echo "$prog: Could not find ssh key server IP in $DHCP_FILE"
+	return 1
+    fi
+
+    # request new password
+    echo "$prog: Found ssh key server IP $SSHKEY_SERVER_IP in $DHCP_FILE"
+    echo "$prog: Sending request to ssh key server at $SSHKEY_SERVER_IP"
+    publickey=$(wget -q -t 3 -T 20 -O - http://$SSHKEY_SERVER_IP/latest/public-keys 2>/dev/null)
+    if [ $? -ne 0 ]; then
+	echo "$prog: Failed to send request to ssh key server at $PASSWORD_SERVER_IP"
+	return 1
+    fi
+
+    echo "$prog: Got response from server at $SSHKEY_SERVER_IP"
+
+    # did we find the keys anywhere?
+    if [ -z "$publickey" ]; then
+        echo "$prog: Failed to get ssh keys from  server"
+        return 1
+    fi
+
+    # set ssh public key
+    homedir=$(grep ^$user /etc/passwd|awk -F ":" '{print $6}')
+    sshdir=$homedir/.ssh
+    authorized=$sshdir/authorized_keys
+
+    if [ ! -e $sshdir ]; then
+        mkdir $sshdir
+    fi
+
+    if [ ! -e $authorized ]; then
+        touch $authorized
+    fi
+
+    if [ `grep -c "$publickey" $authorized` == 0 ]; then
+            echo "$publickey" >> $authorized
+            /sbin/restorecon -R $homedir/.ssh
+    fi
+}
+
+interface=$1
+action=$2
+
+case "$action" in
+    up)
+	cloud_set_guest_sshkey ${interface} ${CONNECTION_UUID}
+	if [ $? -ne 0 ]; then
+	    exit 1
+        fi
+	;;
+esac
